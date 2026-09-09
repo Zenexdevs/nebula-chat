@@ -24,15 +24,20 @@ export default function ParticipantTile({ participant }: { participant: CallPart
       exit={{ opacity: 0, scale: 0.9 }}
       className="glass relative flex aspect-video items-center justify-center overflow-hidden rounded-2xl"
     >
-      {hasVideo ? (
-        <video
-          ref={videoRef}
-          autoPlay
-          playsInline
-          muted={participant.isLocal}
-          className="h-full w-full object-cover"
-        />
-      ) : (
+      {/* Always mounted — even for an audio-only participant — so the
+          <video> element's audio track keeps playing. It was previously
+          only rendered when the camera was on, which meant a voice-only
+          call carried no sound in either direction; `hidden` (display:
+          none) doesn't pause an already-attached media element's audio. */}
+      <video
+        ref={videoRef}
+        autoPlay
+        playsInline
+        muted={participant.isLocal}
+        className={hasVideo ? 'h-full w-full object-cover' : 'hidden'}
+      />
+
+      {!hasVideo && (
         <div className="flex flex-col items-center gap-2">
           <Avatar src={participant.avatarUrl} name={participant.name} size={64} ring />
         </div>
