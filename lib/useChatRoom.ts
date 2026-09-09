@@ -283,7 +283,7 @@ export function useChatRoom(roomId: string, secretKey: Uint8Array, profile: Prof
       const cipherBuf = new Uint8Array(await data.arrayBuffer());
       const plain = decryptRawBytes(secretKey, cipherBuf, decodeBase64(meta.nonce));
       if (!plain) return null;
-      return new Blob([plain], { type: meta.mime });
+      return new Blob([plain as BlobPart], { type: meta.mime });
     },
     [secretKey]
   );

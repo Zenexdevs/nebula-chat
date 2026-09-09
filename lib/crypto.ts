@@ -69,7 +69,12 @@ async function deriveMaterial(
   );
   const saltedInfo = concatBytes(salt, enc.encode(info));
   const bits = await crypto.subtle.deriveBits(
-    { name: 'PBKDF2', salt: saltedInfo, iterations: PBKDF2_ITERATIONS, hash: 'SHA-256' },
+    {
+      name: 'PBKDF2',
+      salt: saltedInfo as BufferSource,
+      iterations: PBKDF2_ITERATIONS,
+      hash: 'SHA-256',
+    },
     passwordKey,
     lengthBytes * 8
   );
