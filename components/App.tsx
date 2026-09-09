@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from 'framer-motion';
 import JoinScreen, { JoinResult } from './JoinScreen';
 import ProfileSetup from './ProfileSetup';
 import ChatRoom from './ChatRoom';
+import { saveSession } from '@/lib/sessionStore';
 import type { Profile } from '@/types';
 
 type Step =
@@ -15,6 +16,11 @@ type Step =
 export default function App({ initialRoomName }: { initialRoomName?: string }) {
   const [step, setStep] = useState<Step>({ name: 'join' });
 
+  function enterChat(session: JoinResult, profile: Profile) {
+    saveSession(session.roomId, session.roomName, session.secretKey, profile);
+    setStep({ name: 'chat', session, profile });
+  }
+
   return (
     <AnimatePresence mode="wait">
       {step.name === 'join' && (
@@ -22,6 +28,7 @@ export default function App({ initialRoomName }: { initialRoomName?: string }) {
           <JoinScreen
             initialRoomName={initialRoomName}
             onJoined={(session) => setStep({ name: 'profile', session })}
+            onResume={(session, profile) => enterChat(session, profile)}
           />
         </motion.div>
       )}
@@ -30,7 +37,7 @@ export default function App({ initialRoomName }: { initialRoomName?: string }) {
         <motion.div key="profile" exit={{ opacity: 0 }} className="h-full">
           <ProfileSetup
             roomName={step.session.roomName}
-            onReady={(profile) => setStep({ name: 'chat', session: step.session, profile })}
+            onReady={(profile) => enterChat(step.session, profile)}
           />
         </motion.div>
       )}
