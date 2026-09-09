@@ -11,6 +11,7 @@ import CallOverlay from './CallOverlay';
 import Avatar from './Avatar';
 import { useChatRoom } from '@/lib/useChatRoom';
 import { useCall } from '@/lib/useCall';
+import { forgetSession } from '@/lib/sessionStore';
 import type { ChatMessage, Profile } from '@/types';
 
 export default function ChatRoom({
@@ -36,6 +37,8 @@ export default function ChatRoom({
     uploadProgress,
     soundEnabled,
     setSoundEnabled,
+    autoDelete24h,
+    setAutoDelete24h,
     setTyping,
     markRead,
     sendMessage,
@@ -78,6 +81,9 @@ export default function ChatRoom({
         onStartCall={call.startCall}
         inCall={call.inCall}
         open={sidebarOpen}
+        autoDelete24h={autoDelete24h}
+        onToggleAutoDelete={setAutoDelete24h}
+        onForgetDevice={() => forgetSession(roomId)}
       />
 
       <div className="flex min-w-0 flex-1 flex-col">
