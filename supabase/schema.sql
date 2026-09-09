@@ -12,8 +12,11 @@ create table if not exists rooms (
   id text primary key,                -- slugified room name, e.g. "team-standup"
   verifier_hash text not null,        -- base64 PBKDF2 output, verification-only
   verifier_salt text not null,        -- base64 salt used for the verifier
+  auto_delete_24h boolean not null default false, -- room-wide "delete messages after 24h" setting
   created_at timestamptz not null default now()
 );
+
+alter table rooms add column if not exists auto_delete_24h boolean not null default false;
 
 -- Encrypted chat messages. `ciphertext` and `nonce` are base64 strings
 -- produced by nacl.secretbox on the client; the server cannot read them.
@@ -42,22 +45,37 @@ create index if not exists messages_room_created_idx on messages (room_id, creat
 alter table rooms enable row level security;
 alter table messages enable row level security;
 
+drop policy if exists "rooms are readable by anyone with the anon key" on rooms;
 create policy "rooms are readable by anyone with the anon key"
   on rooms for select using (true);
 
+drop policy if exists "rooms can be created by anyone with the anon key" on rooms;
 create policy "rooms can be created by anyone with the anon key"
   on rooms for insert with check (true);
 
+drop policy if exists "rooms can be updated by anyone with the anon key" on rooms;
+create policy "rooms can be updated by anyone with the anon key"
+  on rooms for update using (true) with check (true);
+
+drop policy if exists "messages are readable by anyone with the anon key" on messages;
 create policy "messages are readable by anyone with the anon key"
   on messages for select using (true);
 
+drop policy if exists "messages can be inserted by anyone with the anon key" on messages;
 create policy "messages can be inserted by anyone with the anon key"
   on messages for insert with check (true);
 
+drop policy if exists "messages can be updated (for reactions) by anyone with the anon key" on messages;
 create policy "messages can be updated (for reactions) by anyone with the anon key"
   on messages for update using (true);
 
--- Enable Realtime on the messages table.
+drop policy if exists "messages can be deleted by anyone with the anon key" on messages;
+create policy "messages can be deleted by anyone with the anon key"
+  on messages for delete using (true);
+
+-- Enable Realtime on the messages table (INSERT/UPDATE/DELETE — DELETE lets
+-- everyone's screen live-update when the 24h auto-delete setting removes a
+-- message, instead of only noticing on next reload).
 alter publication supabase_realtime add table messages;
 
 -- Storage bucket for encrypted files. Public bucket is safe here because
@@ -67,10 +85,55 @@ insert into storage.buckets (id, name, public)
 values ('nebula-files', 'nebula-files', true)
 on conflict (id) do nothing;
 
+drop policy if exists "anyone with the anon key can read encrypted files" on storage.objects;
 create policy "anyone with the anon key can read encrypted files"
   on storage.objects for select
   using (bucket_id = 'nebula-files');
 
+drop policy if exists "anyone with the anon key can upload encrypted files" on storage.objects;
 create policy "anyone with the anon key can upload encrypted files"
   on storage.objects for insert
   with check (bucket_id = 'nebula-files');
+
+drop policy if exists "anyone with the anon key can delete encrypted files" on storage.objects;
+create policy "anyone with the anon key can delete encrypted files"
+  on storage.objects for delete
+  using (bucket_id = 'nebula-files');
+
+-- ---------------------------------------------------------------------------
+-- 24-hour auto-delete: a server-side backstop.
+--
+-- The app itself also purges expired messages (and their Storage files)
+-- client-side whenever someone has an auto-delete room open — see
+-- lib/useChatRoom.ts. This job is what guarantees deletion even if nobody
+-- ever reopens the room again: it only removes the message ROWS (text and
+-- file metadata) — it does not reach into Storage, since that needs the
+-- Storage REST API rather than plain SQL. In practice any room with
+-- auto-delete on gets visited again well within 24h by someone, and the
+-- client-side pass then clears the associated Storage blob too. Worst case,
+-- an unreferenced ciphertext blob is left in Storage — still unreadable
+-- without the room password, consistent with this project's stated
+-- "encryption is the security boundary" model (see README).
+create extension if not exists pg_cron with schema extensions;
+
+create or replace function public.purge_expired_messages()
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  delete from messages
+  using rooms
+  where messages.room_id = rooms.id
+    and rooms.auto_delete_24h = true
+    and messages.created_at < now() - interval '24 hours';
+end;
+$$;
+
+select cron.schedule(
+  'purge-expired-messages',
+  '*/15 * * * *',
+  $$select public.purge_expired_messages();$$
+)
+where not exists (select 1 from cron.job where jobname = 'purge-expired-messages');
