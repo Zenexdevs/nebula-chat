@@ -1,9 +1,10 @@
 'use client';
 
-import { FormEvent, useState } from 'react';
+import { FormEvent, useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { Lock, Users, ArrowRight, Loader2, ShieldCheck } from 'lucide-react';
+import { Lock, Users, ArrowRight, Loader2, ShieldCheck, X, LogIn } from 'lucide-react';
 import GlassPanel from './GlassPanel';
+import Avatar from './Avatar';
 import { supabase } from '@/lib/supabase';
 import {
   slugifyRoomName,
@@ -13,6 +14,8 @@ import {
   verifiersMatch,
 } from '@/lib/crypto';
 import { encodeBase64, decodeBase64 } from 'tweetnacl-util';
+import { listSessions, forgetSession, type StoredSession } from '@/lib/sessionStore';
+import type { Profile } from '@/types';
 
 export type JoinResult = {
   roomId: string;
@@ -24,14 +27,34 @@ export type JoinResult = {
 export default function JoinScreen({
   initialRoomName = '',
   onJoined,
+  onResume,
 }: {
   initialRoomName?: string;
   onJoined: (result: JoinResult) => void;
+  onResume: (result: JoinResult, profile: Profile) => void;
 }) {
   const [roomName, setRoomName] = useState(initialRoomName);
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [recent, setRecent] = useState<StoredSession[]>([]);
+
+  useEffect(() => {
+    setRecent(listSessions());
+  }, []);
+
+  function handleResume(session: StoredSession) {
+    onResume(
+      { roomId: session.roomId, roomName: session.roomName, secretKey: decodeBase64(session.secretKeyB64), isNewRoom: false },
+      session.profile
+    );
+  }
+
+  function handleForget(e: React.MouseEvent, roomId: string) {
+    e.stopPropagation();
+    forgetSession(roomId);
+    setRecent(listSessions());
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -84,7 +107,7 @@ export default function JoinScreen({
   }
 
   return (
-    <div className="flex h-full w-full items-center justify-center p-6">
+    <div className="flex h-full w-full flex-col items-center justify-center gap-4 overflow-y-auto p-6">
       <motion.div
         initial={{ opacity: 0, y: 24, scale: 0.98 }}
         animate={{ opacity: 1, y: 0, scale: 1 }}
@@ -106,6 +129,41 @@ export default function JoinScreen({
             Private rooms. End-to-end encrypted. Nobody else can read a word.
           </p>
         </div>
+
+        {recent.length > 0 && (
+          <GlassPanel className="mb-4 p-4">
+            <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-white/30">
+              Continue where you left off
+            </p>
+            <div className="flex flex-col gap-1.5">
+              {recent.map((s) => (
+                <button
+                  key={s.roomId}
+                  onClick={() => handleResume(s)}
+                  className="group flex items-center gap-2.5 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-left transition hover:border-neon-cyan/40"
+                >
+                  <Avatar src={s.profile.avatarUrl} name={s.profile.name} size={28} />
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">{s.roomName}</p>
+                    <p className="truncate text-[11px] text-white/40">as {s.profile.name}</p>
+                  </div>
+                  <LogIn className="h-3.5 w-3.5 shrink-0 text-white/30 transition group-hover:text-neon-cyan" />
+                  <button
+                    onClick={(e) => handleForget(e, s.roomId)}
+                    className="shrink-0 rounded-md p-1 text-white/25 transition hover:bg-red-500/10 hover:text-red-300"
+                    aria-label={`Forget ${s.roomName} on this device`}
+                    title="Forget this room on this device"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </button>
+              ))}
+            </div>
+            <p className="mt-2 text-[10px] text-white/25">
+              Saved only in this browser. Use the × to forget a room on a shared device.
+            </p>
+          </GlassPanel>
+        )}
 
         <GlassPanel strong className="p-6">
           <form onSubmit={handleSubmit} className="flex flex-col gap-4">
@@ -172,6 +230,8 @@ export default function JoinScreen({
           </form>
         </GlassPanel>
       </motion.div>
+
+      <p className="pb-2 text-[11px] text-white/20">Made by K35C</p>
     </div>
   );
 }
