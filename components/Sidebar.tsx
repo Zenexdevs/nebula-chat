@@ -2,7 +2,7 @@
 
 import { useState } from 'react';
 import { motion } from 'framer-motion';
-import { Copy, Check, Volume2, VolumeX, LogOut, Users, Phone } from 'lucide-react';
+import { Copy, Check, Volume2, VolumeX, LogOut, Users, Phone, Timer, ShieldOff } from 'lucide-react';
 import Avatar from './Avatar';
 import type { PresenceState } from '@/types';
 
@@ -16,6 +16,9 @@ export default function Sidebar({
   onStartCall,
   inCall,
   open,
+  autoDelete24h,
+  onToggleAutoDelete,
+  onForgetDevice,
 }: {
   roomName: string;
   presence: Record<string, PresenceState>;
@@ -26,8 +29,12 @@ export default function Sidebar({
   onStartCall: () => void;
   inCall: boolean;
   open: boolean;
+  autoDelete24h: boolean;
+  onToggleAutoDelete: (enabled: boolean) => void;
+  onForgetDevice: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [forgot, setForgot] = useState(false);
   const members = Object.values(presence).sort((a, b) => (a.id === selfId ? -1 : a.name.localeCompare(b.name)));
 
   function copyInvite() {
@@ -38,6 +45,12 @@ export default function Sidebar({
     });
   }
 
+  function handleForget() {
+    onForgetDevice();
+    setForgot(true);
+    setTimeout(() => setForgot(false), 1800);
+  }
+
   return (
     <motion.aside
       initial={false}
@@ -45,7 +58,7 @@ export default function Sidebar({
       transition={{ duration: 0.25, ease: 'easeOut' }}
       className="glass-strong flex h-full shrink-0 flex-col overflow-hidden border-r border-white/10"
     >
-      <div className="w-72 p-5">
+      <div className="w-72 flex-1 overflow-y-auto scrollbar-thin p-5">
         <h2 className="truncate text-lg font-bold text-gradient">{roomName}</h2>
         <p className="mt-0.5 flex items-center gap-1 text-xs text-white/40">
           <Users className="h-3.5 w-3.5" /> {members.length} online
@@ -69,7 +82,7 @@ export default function Sidebar({
           </button>
         </div>
 
-        <div className="mt-6 flex-1">
+        <div className="mt-6">
           <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-white/30">Members</p>
           <div className="flex flex-col gap-1">
             {members.map((m) => (
@@ -86,6 +99,39 @@ export default function Sidebar({
               </div>
             ))}
           </div>
+        </div>
+
+        <div className="mt-6 border-t border-white/10 pt-4">
+          <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-white/30">Privacy</p>
+
+          <label className="flex cursor-pointer items-start gap-2.5 rounded-xl px-2 py-2 transition hover:bg-white/5">
+            <span
+              className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition ${
+                autoDelete24h ? 'border-neon-cyan bg-neon-cyan/80' : 'border-white/25 bg-transparent'
+              }`}
+              onClick={(e) => {
+                e.preventDefault();
+                onToggleAutoDelete(!autoDelete24h);
+              }}
+            >
+              {autoDelete24h && <Timer className="h-3 w-3 text-void-950" />}
+            </span>
+            <span className="text-xs text-white/60">
+              Auto-delete messages after 24h
+              <span className="mt-0.5 block text-[10px] text-white/30">
+                Applies to everyone in this room. Deletes the message and its file from storage.
+              </span>
+            </span>
+          </label>
+
+          <button
+            onClick={handleForget}
+            className="mt-1 flex w-full items-center gap-2.5 rounded-xl px-2 py-2 text-left text-xs text-white/60 transition hover:bg-white/5"
+            title="Remove this room's saved key from this browser"
+          >
+            <ShieldOff className="h-3.5 w-3.5 shrink-0" />
+            {forgot ? 'Forgotten on this device' : 'Forget this room on this device'}
+          </button>
         </div>
       </div>
 
