@@ -23,9 +23,29 @@ import type { RealtimeChannel } from '@supabase/supabase-js';
 import { supabase } from './supabase';
 import type { CallParticipant } from '@/types';
 
+// STUN alone frequently fails to connect real-world NAT pairs (mobile
+// networks, CGNAT, restrictive corporate/home routers) — the call signals
+// fine but no media ever flows, which looks exactly like "I can't hear
+// them and they can't hear me". A TURN relay is the fix: when a direct
+// path can't be found, media is relayed through the TURN server instead.
+// Metered's Open Relay project publishes these credentials for free,
+// public use (rate-limited, fine for casual use between a few people). For
+// heavier use, sign up for a free Metered.ca account and set
+// NEXT_PUBLIC_TURN_URL / _USERNAME / _CREDENTIAL to your own credentials.
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: 'stun:stun.l.google.com:19302' },
   { urls: 'stun:stun1.l.google.com:19302' },
+  {
+    urls: process.env.NEXT_PUBLIC_TURN_URL || 'turn:openrelay.metered.ca:80',
+    username: process.env.NEXT_PUBLIC_TURN_USERNAME || 'openrelayproject',
+    credential: process.env.NEXT_PUBLIC_TURN_CREDENTIAL || 'openrelayproject',
+  },
+  { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+  {
+    urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+    username: 'openrelayproject',
+    credential: 'openrelayproject',
+  },
 ];
 
 type SignalMessage =
@@ -344,7 +364,15 @@ export function useCall(
 
       peersRef.current.forEach((p) => {
         const sender = p.connection.getSenders().find((s) => s.track?.kind === 'video');
-        if (sender) sender.replaceTrack(screenTrack);
+        if (sender) {
+          sender.replaceTrack(screenTrack);
+        } else {
+          // No existing video sender (camera was never turned on) — a
+          // replaceTrack() here would silently do nothing, which is why
+          // the screen never reached the other side. Add a fresh sender
+          // instead; this renegotiates and creates the video m-line.
+          p.connection.addTrack(screenTrack, display);
+        }
         send({ kind: 'screen-share', to: p.id, from: selfId, active: true });
       });
 
