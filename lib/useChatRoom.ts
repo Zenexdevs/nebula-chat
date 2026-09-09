@@ -16,6 +16,12 @@ import { playJoinSound, playMessageSound } from './sound';
 import type { ChatMessage, FileMeta, PresenceState, Profile } from '@/types';
 import { encodeBase64, decodeBase64 } from 'tweetnacl-util';
 
+const AUTO_DELETE_MS = 24 * 60 * 60 * 1000;
+// Safety-net poll: catches any message a dropped/throttled realtime
+// connection missed (e.g. a backgrounded browser tab), instead of only
+// ever recovering on a manual leave + rejoin.
+const POLL_INTERVAL_MS = 6000;
+
 type Row = {
   id: string;
   room_id: string;
@@ -65,15 +71,55 @@ export function useChatRoom(roomId: string, secretKey: Uint8Array, profile: Prof
   const [presence, setPresence] = useState<Record<string, PresenceState>>({});
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [soundEnabled, setSoundEnabled] = useState(true);
+  const [autoDelete24h, setAutoDelete24hState] = useState(false);
 
   const channelRef = useRef<RealtimeChannel | null>(null);
   const soundEnabledRef = useRef(true);
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isFirstLoadRef = useRef(true);
+  const latestCreatedAtRef = useRef<string | null>(null);
+  const profileRef = useRef(profile);
 
   useEffect(() => {
     soundEnabledRef.current = soundEnabled;
   }, [soundEnabled]);
+
+  useEffect(() => {
+    profileRef.current = profile;
+  }, [profile]);
+
+  /** Decrypts, de-dupes, and merges rows into state — used by the initial
+   *  load, the realtime INSERT handler, and the polling safety net alike,
+   *  so all three paths behave identically. Returns only the rows that
+   *  were actually new (not already in state). */
+  const mergeRows = useCallback(
+    (rows: Row[]): ChatMessage[] => {
+      const decoded = rows.map((row) => decryptRow(row, secretKey)).filter((m): m is ChatMessage => m !== null);
+      if (decoded.length === 0) return [];
+
+      let fresh: ChatMessage[] = [];
+      setMessages((prev) => {
+        const ids = new Set(prev.map((m) => m.id));
+        fresh = decoded.filter((m) => !ids.has(m.id));
+        if (fresh.length === 0) return prev;
+        return [...prev, ...fresh].sort((a, b) => (a.createdAt < b.createdAt ? -1 : a.createdAt > b.createdAt ? 1 : 0));
+      });
+
+      for (const m of decoded) {
+        if (!latestCreatedAtRef.current || m.createdAt > latestCreatedAtRef.current) {
+          latestCreatedAtRef.current = m.createdAt;
+        }
+      }
+      return fresh;
+    },
+    [secretKey]
+  );
+
+  const removeMessages = useCallback((ids: string[]) => {
+    if (ids.length === 0) return;
+    const idSet = new Set(ids);
+    setMessages((prev) => prev.filter((m) => !idSet.has(m.id)));
+  }, []);
 
   // Initial history load
   useEffect(() => {
@@ -88,21 +134,86 @@ export function useChatRoom(roomId: string, secretKey: Uint8Array, profile: Prof
         .limit(500);
 
       if (!cancelled) {
-        if (!error && data) {
-          const decoded = (data as Row[])
-            .map((row) => decryptRow(row, secretKey))
-            .filter((m): m is ChatMessage => m !== null);
-          setMessages(decoded);
-        }
+        if (!error && data) mergeRows(data as Row[]);
         setLoadingHistory(false);
       }
     })();
     return () => {
       cancelled = true;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, secretKey]);
 
-  // Realtime: new messages + reaction updates + presence + typing
+  // Room settings (auto-delete flag)
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data } = await supabase.from('rooms').select('auto_delete_24h').eq('id', roomId).maybeSingle();
+      if (!cancelled && data) setAutoDelete24hState(Boolean((data as { auto_delete_24h?: boolean }).auto_delete_24h));
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [roomId]);
+
+  const setAutoDelete24h = useCallback(
+    async (enabled: boolean) => {
+      setAutoDelete24hState(enabled);
+      const { error } = await supabase.from('rooms').update({ auto_delete_24h: enabled }).eq('id', roomId);
+      if (error) console.error('setAutoDelete24h failed', error);
+    },
+    [roomId]
+  );
+
+  // Best-effort client-side cleanup for rooms with auto-delete on: removes
+  // the encrypted file blob from Storage *and* the message row for
+  // anything older than 24h. A server-side scheduled job (see
+  // supabase/schema.sql) deletes expired rows even when nobody has the
+  // room open; this just runs it eagerly (and catches file blobs) whenever
+  // someone does.
+  const purgeExpired = useCallback(async () => {
+    const cutoff = new Date(Date.now() - AUTO_DELETE_MS).toISOString();
+    try {
+      const { data: expiredFiles } = await supabase
+        .from('messages')
+        .select('id, file_meta_cipher, file_meta_nonce')
+        .eq('room_id', roomId)
+        .eq('msg_type', 'file')
+        .lt('created_at', cutoff);
+
+      const paths: string[] = [];
+      (expiredFiles ?? []).forEach((row: { file_meta_cipher: string | null; file_meta_nonce: string | null }) => {
+        if (!row.file_meta_cipher || !row.file_meta_nonce) return;
+        const meta = decryptJSON<FileMeta>(secretKey, row.file_meta_cipher, row.file_meta_nonce);
+        if (meta?.path) paths.push(meta.path);
+      });
+      if (paths.length > 0) {
+        await supabase.storage.from(STORAGE_BUCKET).remove(paths);
+      }
+
+      const { data: deletedRows } = await supabase
+        .from('messages')
+        .delete()
+        .eq('room_id', roomId)
+        .lt('created_at', cutoff)
+        .select('id');
+
+      if (deletedRows && deletedRows.length > 0) {
+        removeMessages((deletedRows as { id: string }[]).map((r) => r.id));
+      }
+    } catch (err) {
+      console.error('purgeExpired failed', err);
+    }
+  }, [roomId, secretKey, removeMessages]);
+
+  useEffect(() => {
+    if (!autoDelete24h) return;
+    purgeExpired();
+    const interval = setInterval(purgeExpired, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, [autoDelete24h, purgeExpired]);
+
+  // Realtime: new messages + reaction updates + deletions + presence + typing
   useEffect(() => {
     const channel = supabase.channel(`room:${roomId}`, {
       config: { presence: { key: profile.id } },
@@ -114,13 +225,9 @@ export function useChatRoom(roomId: string, secretKey: Uint8Array, profile: Prof
       { event: 'INSERT', schema: 'public', table: 'messages', filter: `room_id=eq.${roomId}` },
       (payload) => {
         const row = payload.new as Row;
-        const decoded = decryptRow(row, secretKey);
-        if (!decoded) return;
-        setMessages((prev) => {
-          if (prev.some((m) => m.id === decoded.id)) return prev;
-          return [...prev, decoded];
-        });
-        if (decoded.senderId !== profile.id && soundEnabledRef.current) playMessageSound();
+        const fresh = mergeRows([row]);
+        const decoded = fresh[0];
+        if (decoded && decoded.senderId !== profile.id && soundEnabledRef.current) playMessageSound();
       }
     );
 
@@ -132,6 +239,15 @@ export function useChatRoom(roomId: string, secretKey: Uint8Array, profile: Prof
         setMessages((prev) =>
           prev.map((m) => (m.id === row.id ? { ...m, reactions: row.reactions ?? {} } : m))
         );
+      }
+    );
+
+    channel.on(
+      'postgres_changes',
+      { event: 'DELETE', schema: 'public', table: 'messages', filter: `room_id=eq.${roomId}` },
+      (payload) => {
+        const oldRow = payload.old as { id?: string };
+        if (oldRow?.id) removeMessages([oldRow.id]);
       }
     );
 
@@ -171,6 +287,50 @@ export function useChatRoom(roomId: string, secretKey: Uint8Array, profile: Prof
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roomId, secretKey, profile.id]);
+
+  // Self-healing safety net: a backgrounded/throttled tab or a dropped
+  // websocket can silently miss a realtime event. Poll for anything newer
+  // than the last message we know about, and also re-sync immediately
+  // whenever the tab regains focus/visibility (also re-announces presence,
+  // in case that went stale too).
+  useEffect(() => {
+    let cancelled = false;
+
+    const poll = async () => {
+      let query = supabase
+        .from('messages')
+        .select('*')
+        .eq('room_id', roomId)
+        .order('created_at', { ascending: true })
+        .limit(200);
+      if (latestCreatedAtRef.current) query = query.gt('created_at', latestCreatedAtRef.current);
+      const { data, error } = await query;
+      if (!cancelled && !error && data && data.length > 0) mergeRows(data as Row[]);
+    };
+
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return;
+      poll();
+      channelRef.current?.track({
+        id: profileRef.current.id,
+        name: profileRef.current.name,
+        avatarUrl: profileRef.current.avatarUrl,
+        status: profileRef.current.status,
+        online_at: new Date().toISOString(),
+        typing: false,
+      } satisfies PresenceState);
+    };
+
+    const interval = setInterval(poll, POLL_INTERVAL_MS);
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', onVisible);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', onVisible);
+    };
+  }, [roomId, mergeRows]);
 
   const updatePresence = useCallback(
     (patch: Partial<PresenceState>) => {
@@ -319,6 +479,8 @@ export function useChatRoom(roomId: string, secretKey: Uint8Array, profile: Prof
     uploadProgress,
     soundEnabled,
     setSoundEnabled,
+    autoDelete24h,
+    setAutoDelete24h,
     setTyping,
     markRead,
     sendMessage,
